@@ -14,6 +14,7 @@ import io
 import base64
 import subprocess
 import platform
+import re
 from PIL import Image
 
 app = FastAPI()
@@ -37,6 +38,30 @@ IMAGES_DIR.mkdir(exist_ok=True)
 
 # Store file metadata
 file_storage = {}
+
+def sanitize_filename(name: str) -> str:
+    """Sanitize a string to be safe for use as a filename"""
+    if not name or not name.strip():
+        return "Presentation"
+    
+    # Remove or replace unsafe characters
+    sanitized = re.sub(r'[<>:"/\\|?*]', '_', name.strip())
+    
+    # Remove multiple spaces and replace with single underscore
+    sanitized = re.sub(r'\s+', '_', sanitized)
+    
+    # Remove leading/trailing dots and spaces
+    sanitized = sanitized.strip('._')
+    
+    # Limit length to reasonable size
+    if len(sanitized) > 100:
+        sanitized = sanitized[:100]
+    
+    # Ensure it's not empty after sanitization
+    if not sanitized:
+        sanitized = "Presentation"
+    
+    return sanitized
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...)):
@@ -125,6 +150,100 @@ async def get_file_data(file_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading file data: {str(e)}")
 
+@app.delete("/api/clear-all")
+async def clear_all_uploads():
+    """Delete all uploaded files and clear storage from all directories"""
+    try:
+        deleted_files = []
+        errors = []
+        
+        # Directories to clean
+        directories_to_clean = [
+            ("uploads", UPLOAD_DIR),
+            ("previews", PREVIEW_DIR), 
+            ("images", IMAGES_DIR)
+        ]
+        
+        # Clear in-memory storage first to release any file handles
+        file_storage.clear()
+        print("Cleared file_storage dictionary")
+        
+        # Force garbage collection to release file handles
+        import gc
+        gc.collect()
+        
+        # Clear all files from each directory
+        for dir_name, dir_path in directories_to_clean:
+            if dir_path.exists():
+                print(f"Cleaning {dir_name} directory...")
+                for file_path in dir_path.glob("*"):
+                    if file_path.is_file():
+                        try:
+                            # Try to delete file normally first
+                            file_path.unlink()
+                            deleted_files.append(f"{dir_name}/{file_path.name}")
+                            print(f"Deleted file: {file_path}")
+                        except PermissionError as e:
+                            # If file is locked, try multiple methods to force delete
+                            deleted_successfully = False
+                            try:
+                                import subprocess
+                                import time
+                                
+                                if platform.system() == "Windows":
+                                    # Method 1: Try del command
+                                    result = subprocess.run(['cmd', '/c', f'del /F /Q "{file_path}"'], 
+                                                          capture_output=True, text=True)
+                                    
+                                    # Wait a moment and check if file was actually deleted
+                                    time.sleep(0.1)
+                                    if not file_path.exists():
+                                        deleted_files.append(f"{dir_name}/{file_path.name}")
+                                        print(f"Force deleted locked file with del: {file_path}")
+                                        deleted_successfully = True
+                                    else:
+                                        # Method 2: Try using os.remove with retry
+                                        for attempt in range(3):
+                                            try:
+                                                time.sleep(0.1)
+                                                os.remove(str(file_path))
+                                                deleted_files.append(f"{dir_name}/{file_path.name}")
+                                                print(f"Deleted locked file on retry {attempt + 1}: {file_path}")
+                                                deleted_successfully = True
+                                                break
+                                            except:
+                                                continue
+                                
+                                if not deleted_successfully:
+                                    error_msg = f"Failed to delete locked file {dir_name}/{file_path.name}: File remains locked"
+                                    errors.append(error_msg)
+                                    print(f"Cannot delete locked file after all attempts: {file_path}")
+                                    
+                            except Exception as e2:
+                                error_msg = f"Failed to delete {dir_name}/{file_path.name}: {str(e2)}"
+                                errors.append(error_msg)
+                                print(f"Error force deleting {file_path}: {e2}")
+                        except Exception as e:
+                            error_msg = f"Failed to delete {dir_name}/{file_path.name}: {str(e)}"
+                            errors.append(error_msg)
+                            print(f"Error deleting {file_path}: {e}")
+            else:
+                print(f"Directory {dir_name} does not exist")
+        
+        # File storage already cleared above
+        
+        return JSONResponse(content={
+            "message": "All files cleared successfully from uploads, previews, and images directories",
+            "deleted_files": deleted_files,
+            "errors": errors,
+            "total_deleted": len(deleted_files),
+            "directories_cleaned": ["uploads", "previews", "images"]
+        })
+        
+    except Exception as e:
+        print(f"Error clearing all files: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error clearing all files: {str(e)}")
+
 @app.delete("/api/upload/{file_id}")
 async def delete_file(file_id: str):
     """Delete uploaded file"""
@@ -140,16 +259,58 @@ async def delete_file(file_id: str):
         filepath = file_info["filepath"]
         print(f"Attempting to delete file at: {filepath}")
         
-        # Delete file from disk
-        if os.path.exists(filepath):
-            os.remove(filepath)
-            print(f"File deleted from disk: {filepath}")
-        else:
-            print(f"File not found on disk: {filepath}")
-        
-        # Remove from storage
+        # Remove from storage first to release file handle
         del file_storage[file_id]
         print(f"File removed from storage: {file_id}")
+        
+        # Force garbage collection to release file handles
+        import gc
+        gc.collect()
+        
+        # Delete file from disk with improved error handling
+        if os.path.exists(filepath):
+            try:
+                # Try normal deletion first
+                os.remove(filepath)
+                print(f"File deleted from disk: {filepath}")
+            except PermissionError as e:
+                # If file is locked, try multiple methods
+                deleted_successfully = False
+                try:
+                    import subprocess
+                    import time
+                    
+                    if platform.system() == "Windows":
+                        # Method 1: Try del command
+                        result = subprocess.run(['cmd', '/c', f'del /F /Q "{filepath}"'], 
+                                              capture_output=True, text=True)
+                        
+                        # Wait and check if file was deleted
+                        time.sleep(0.1)
+                        if not os.path.exists(filepath):
+                            print(f"Force deleted locked file with del: {filepath}")
+                            deleted_successfully = True
+                        else:
+                            # Method 2: Retry with os.remove
+                            for attempt in range(3):
+                                try:
+                                    time.sleep(0.1)
+                                    os.remove(filepath)
+                                    print(f"Deleted locked file on retry {attempt + 1}: {filepath}")
+                                    deleted_successfully = True
+                                    break
+                                except:
+                                    continue
+                    
+                    if not deleted_successfully:
+                        print(f"Warning: Could not delete locked file: {filepath}")
+                        # Don't raise error - file is removed from storage anyway
+                        
+                except Exception as e2:
+                    print(f"Error force deleting {filepath}: {e2}")
+                    # Don't raise error - file is removed from storage anyway
+        else:
+            print(f"File not found on disk: {filepath}")
         
         return JSONResponse(content={"message": "File deleted successfully"})
         
@@ -157,40 +318,6 @@ async def delete_file(file_id: str):
         print(f"Error deleting file: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error deleting file: {str(e)}")
 
-@app.delete("/api/upload/clear-all")
-async def clear_all_uploads():
-    """Delete all uploaded files and clear storage"""
-    try:
-        deleted_files = []
-        errors = []
-        
-        # Clear all files from uploads directory
-        upload_dir = Path("uploads")
-        if upload_dir.exists():
-            for file_path in upload_dir.glob("*"):
-                if file_path.is_file():
-                    try:
-                        file_path.unlink()  # Delete file
-                        deleted_files.append(str(file_path.name))
-                        print(f"Deleted file: {file_path}")
-                    except Exception as e:
-                        errors.append(f"Failed to delete {file_path.name}: {str(e)}")
-                        print(f"Error deleting {file_path}: {e}")
-        
-        # Clear in-memory storage
-        file_storage.clear()
-        print("Cleared file_storage dictionary")
-        
-        return JSONResponse(content={
-            "message": "All uploads cleared successfully",
-            "deleted_files": deleted_files,
-            "errors": errors,
-            "total_deleted": len(deleted_files)
-        })
-        
-    except Exception as e:
-        print(f"Error clearing uploads: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error clearing uploads: {str(e)}")
 
 def create_powerpoint_preview_image(customizations: dict, output_path: Path) -> bool:
     """Create a preview image that matches the PowerPoint layout using FirstPage.png"""
@@ -398,13 +525,20 @@ async def generate_preview_ppt(data: dict):
         made_by_frame.paragraphs[0].font.size = Inches(16/72)  # 16pt font size
         made_by_frame.paragraphs[0].font.color.rgb = RGBColor(68, 68, 68)
         
-        # Save preview PowerPoint
-        preview_filename = f"preview_{file_id}.pptx"
+        # Save preview PowerPoint with custom filename based on presentation name
+        presentation_name = customizations.get("presentationTo", "Presentation")
+        sanitized_name = sanitize_filename(presentation_name)
+        
+        # Add unique identifier to prevent conflicts while keeping readable name
+        unique_id = str(uuid.uuid4())[:8]  # Short unique ID
+        preview_filename = f"{sanitized_name}_{unique_id}.pptx"
+        download_filename = f"{sanitized_name}.pptx"  # Clean name for download
+        
         preview_path = PREVIEW_DIR / preview_filename
         prs.save(str(preview_path))
         
         # Create preview image that matches the PowerPoint content
-        image_filename = f"preview_{file_id}.png"
+        image_filename = f"{sanitized_name}_{unique_id}_preview.png"
         image_path = IMAGES_DIR / image_filename
         
         # Generate actual preview image with the same content
@@ -418,8 +552,9 @@ async def generate_preview_ppt(data: dict):
         return JSONResponse(content={
             "message": "Preview generated successfully",
             "previewFile": preview_filename,
+            "downloadFilename": download_filename,
             "imageFile": image_filename,
-            "downloadUrl": f"/api/download-preview/{preview_filename}",
+            "downloadUrl": f"/api/download-preview/{preview_filename}?download_name={download_filename}",
             "imageUrl": f"/api/preview-image/{image_filename}"
         })
         
@@ -428,17 +563,20 @@ async def generate_preview_ppt(data: dict):
         raise HTTPException(status_code=500, detail=f"Error generating preview: {str(e)}")
 
 @app.get("/api/download-preview/{filename}")
-async def download_preview(filename: str):
+async def download_preview(filename: str, download_name: str = None):
     """Download generated preview PowerPoint"""
     try:
         file_path = PREVIEW_DIR / filename
         if not file_path.exists():
             raise HTTPException(status_code=404, detail="Preview file not found")
         
+        # Use custom download name if provided, otherwise use the filename
+        download_filename = download_name if download_name else filename
+        
         return FileResponse(
             path=str(file_path),
             media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            filename=filename
+            filename=download_filename
         )
         
     except Exception as e:
@@ -462,6 +600,28 @@ async def get_preview_image(filename: str):
     except Exception as e:
         print(f"Error serving preview image: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error serving preview image: {str(e)}")
+
+@app.get("/api/files")
+async def get_all_files():
+    """Get information about all uploaded files"""
+    try:
+        files_info = []
+        for file_id, file_data in file_storage.items():
+            files_info.append({
+                "fileId": file_id,
+                "filename": file_data["filename"],
+                "sheets": file_data["sheets"],
+                "content_type": file_data["content_type"]
+            })
+        
+        return JSONResponse(content={
+            "files": files_info,
+            "total_files": len(files_info)
+        })
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error getting files info: {str(e)}")
+
 
 @app.get("/api/health")
 async def health_check():

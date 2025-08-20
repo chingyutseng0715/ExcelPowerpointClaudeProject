@@ -6,17 +6,20 @@ const Body = () => {
   const navigate = useNavigate();
 
   const handleGetStarted = () => {
-    // Check if user has uploaded a file
+    // Check if user has uploaded files
     const project = JSON.parse(localStorage.getItem('currentProject') || '{}');
     
-    if (!project.fileId) {
-      // No file uploaded, redirect to upload page
-      alert('Please upload an Excel file first before proceeding.');
+    // Check for new multi-file structure or legacy single file structure
+    const hasFiles = (project.files && Array.isArray(project.files) && project.files.length > 0) || project.fileId;
+    
+    if (!hasFiles) {
+      // No files uploaded, redirect to upload page
+      alert('Please upload Excel files first before proceeding.');
       navigate('/upload');
       return;
     }
     
-    // File exists, proceed to process page
+    // Files exist, proceed to process page
     navigate('/process');
   };
 
@@ -40,12 +43,12 @@ const Body = () => {
         </h1>
 
         <p className='text-base sm:text-lg tradcking-wider text-gray-400 max-w-[25rem] lg:max-w-[30rem]'>
-          Download the indicated format below to enjoy the full functionality of the application.
+          Upload multiple Excel files and convert them to customized PowerPoint presentations with ease.
         </p>
 
         <div className='flex gap-4 mt-12'>
           <a onClick={handleUploadFile} className='border border-[#2a2a2a] py-2 sm:py-3 px-4 sm:px-5 rounded-full sm:text-lg tesm-sm font-semibold tracking-wider transtition-all duration-300 hover:bg-[#1a1a1a]' href="#">
-            UPLOAD FILE <i className='bx bx-extension'></i>
+            UPLOAD FILES <i className='bx bx-extension'></i>
           </a>
           
           <button 

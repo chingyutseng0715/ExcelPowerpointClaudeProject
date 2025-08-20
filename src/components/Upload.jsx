@@ -1,15 +1,22 @@
 // src/components/Upload.jsx
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import 'boxicons/css/boxicons.min.css';
 
 const Upload = () => {
   const navigate = useNavigate();
   const [dragActive, setDragActive] = useState(false);
-  const [uploadedFile, setUploadedFile] = useState(null);
+  const [uploadedFiles, setUploadedFiles] = useState([]); // Changed to array for multiple files
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState(null);
-  const [fileId, setFileId] = useState(null); // Backend file ID
+
+  // Load existing files on component mount
+  useEffect(() => {
+    const existingProject = JSON.parse(localStorage.getItem('currentProject') || '{}');
+    if (existingProject.files && Array.isArray(existingProject.files)) {
+      setUploadedFiles(existingProject.files);
+    }
+  }, []);
 
   const handleDrag = (e) => {
     e.preventDefault();
@@ -38,9 +45,8 @@ const Upload = () => {
   };
 
   const handleFile = async (file) => {
-    // Reset states
+    // Reset error state
     setUploadError(null);
-    setUploadedFile(null);
     
     // Check file type
     const allowedTypes = [
@@ -81,24 +87,28 @@ const Upload = () => {
 
       const result = await response.json();
       
-      // Store file info and backend file ID
-      setUploadedFile({
+      // Create new file object
+      const newFile = {
+        fileId: result.fileId,
         name: file.name,
         size: file.size,
         type: file.type,
-        uploadedAt: new Date().toISOString()
-      });
-      
-      setFileId(result.fileId); // Backend returns unique file ID
-      
-      // Store in localStorage for persistence
-      localStorage.setItem('currentProject', JSON.stringify({
-        fileId: result.fileId,
-        fileName: file.name,
-        fileSize: file.size,
         uploadedAt: new Date().toISOString(),
-        sheets: result.sheets || [] // Backend returns sheet names
-      }));
+        sheets: result.sheets || []
+      };
+      
+      // Add to uploaded files array
+      setUploadedFiles(prev => [...prev, newFile]);
+      
+      // Update localStorage with all files
+      const existingProject = JSON.parse(localStorage.getItem('currentProject') || '{}');
+      const updatedProject = {
+        ...existingProject,
+        files: [...(existingProject.files || []), newFile],
+        lastUpdated: new Date().toISOString()
+      };
+      
+      localStorage.setItem('currentProject', JSON.stringify(updatedProject));
 
     } catch (error) {
       console.error('Upload error:', error);
@@ -109,7 +119,7 @@ const Upload = () => {
   };
 
   const handleContinue = () => {
-    if (uploadedFile && fileId) {
+    if (uploadedFiles.length > 0) {
       navigate('/process'); // Navigate to data processing page
     }
   };
@@ -118,22 +128,61 @@ const Upload = () => {
     navigate('/');
   };
 
-  const handleRemoveFile = async () => {
-    if (fileId) {
-      try {
-        // Delete file from backend
-        await fetch(`http://localhost:8000/api/upload/${fileId}`, {
-          method: 'DELETE'
-        });
-      } catch (error) {
-        console.error('Error deleting file:', error);
+  const handleRemoveFile = async (fileToRemove) => {
+    try {
+      // Delete file from backend
+      const response = await fetch(`http://localhost:8000/api/upload/${fileToRemove.fileId}`, {
+        method: 'DELETE'
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.warn(`Backend deletion failed: ${response.status} - ${errorText}`);
+        // Continue with frontend cleanup anyway
+      } else {
+        console.log('File successfully deleted from backend');
       }
+    } catch (error) {
+      console.error('Error deleting file from backend:', error);
+      // Continue with frontend cleanup anyway
     }
     
-    setUploadedFile(null);
-    setFileId(null);
+    // Remove from uploaded files array
+    const updatedFiles = uploadedFiles.filter(file => file.fileId !== fileToRemove.fileId);
+    setUploadedFiles(updatedFiles);
+    
+    // Update localStorage
+    if (updatedFiles.length === 0) {
+      localStorage.removeItem('currentProject');
+    } else {
+      const existingProject = JSON.parse(localStorage.getItem('currentProject') || '{}');
+      const updatedProject = {
+        ...existingProject,
+        files: updatedFiles,
+        lastUpdated: new Date().toISOString()
+      };
+      localStorage.setItem('currentProject', JSON.stringify(updatedProject));
+    }
+    
     setUploadError(null);
-    localStorage.removeItem('currentProject');
+  };
+
+  const handleUploadAnother = () => {
+    // Reset upload state and trigger file input
+    setUploadError(null);
+    // Trigger the hidden file input by creating and clicking a temporary input
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.accept = '.xlsx,.xls,.csv';
+    fileInput.style.display = 'none';
+    fileInput.addEventListener('change', (e) => {
+      if (e.target.files && e.target.files[0]) {
+        handleFile(e.target.files[0]);
+      }
+    });
+    document.body.appendChild(fileInput);
+    fileInput.click();
+    document.body.removeChild(fileInput);
   };
 
   return (
@@ -147,7 +196,9 @@ const Upload = () => {
       </button>
 
       <div className="max-w-2xl w-full">
-        <h1 className="text-4xl font-bold text-center mb-8">Upload Your Excel File</h1>
+        <h1 className="text-4xl font-bold text-center mb-8">
+          {uploadedFiles.length === 0 ? 'Upload Your Excel Files' : `Uploaded Files (${uploadedFiles.length})`}
+        </h1>
         
         {uploadError && (
           <div className="bg-red-500/20 border border-red-500 rounded-lg p-4 mb-6 text-center">
@@ -156,8 +207,8 @@ const Upload = () => {
           </div>
         )}
         
-        {!uploadedFile ? (
-          <>
+        {/* Upload Area - Always visible for adding more files */}
+        <div className="mb-6">
             {/* Drag and Drop Area */}
             <div 
               className={`relative border-2 border-dashed rounded-xl p-12 text-center transition-all duration-300 ${
@@ -187,10 +238,10 @@ const Upload = () => {
               ) : (
                 <div className="flex flex-col items-center">
                   <i className='bx bx-cloud-upload text-6xl text-[#e99b63] mb-4'></i>
-                  <p className="text-xl mb-2">Drag and drop your Excel file here</p>
+                  <p className="text-xl mb-2">{uploadedFiles.length === 0 ? 'Drag and drop your Excel files here' : 'Add more Excel files'}</p>
                   <p className="text-gray-400 mb-4">or</p>
                   <div className="border border-[#e99b63] py-3 px-6 rounded-full font-semibold tracking-wider transition-all duration-300 hover:bg-[#e99b63] hover:text-black">
-                    Browse Files
+                    {uploadedFiles.length === 0 ? 'Browse Files' : 'Browse More Files'}
                   </div>
                   <p className="text-sm text-gray-500 mt-4">
                     Supported formats: .xlsx, .xls, .csv (Max 10MB)
@@ -198,39 +249,51 @@ const Upload = () => {
                 </div>
               )}
             </div>
-          </>
-        ) : (
-          /* File Uploaded Successfully */
-          <div className="border border-[#2a2a2a] rounded-xl p-8 text-center">
-            <i className='bx bx-check-circle text-6xl text-green-500 mb-4'></i>
-            <h2 className="text-2xl font-semibold mb-4">File Processed Successfully!</h2>
+        </div>
+
+        {/* Uploaded Files List */}
+        {uploadedFiles.length > 0 && (
+          <div className="mb-6">
+            <h2 className="text-2xl font-semibold mb-4 text-center text-green-500">
+              <i className='bx bx-check-circle mr-2'></i>
+              Files Processed Successfully!
+            </h2>
             
-            <div className="bg-[#1a1a1a] rounded-lg p-4 mb-6">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center">
-                  <i className='bx bx-file text-2xl text-[#e99b63] mr-3'></i>
-                  <div className="text-left">
-                    <p className="font-semibold">{uploadedFile.name}</p>
-                    <p className="text-sm text-gray-400">
-                      {(uploadedFile.size / 1024 / 1024).toFixed(2)} MB
-                    </p>
+            <div className="space-y-3 max-h-60 overflow-y-auto">
+              {uploadedFiles.map((file, index) => (
+                <div key={file.fileId} className="bg-[#1a1a1a] rounded-lg p-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center flex-1">
+                      <i className='bx bx-file text-2xl text-[#e99b63] mr-3'></i>
+                      <div className="text-left flex-1">
+                        <p className="font-semibold truncate">{file.name}</p>
+                        <div className="flex items-center gap-4 text-sm text-gray-400">
+                          <span>{(file.size / 1024 / 1024).toFixed(2)} MB</span>
+                          <span>•</span>
+                          <span>{file.sheets.length} sheet{file.sheets.length !== 1 ? 's' : ''}</span>
+                          <span>•</span>
+                          <span>#{index + 1}</span>
+                        </div>
+                      </div>
+                    </div>
+                    <button 
+                      onClick={() => handleRemoveFile(file)}
+                      className="text-red-500 hover:text-red-400 transition-colors ml-4"
+                      title="Remove file"
+                    >
+                      <i className='bx bx-x text-xl'></i>
+                    </button>
                   </div>
                 </div>
-                <button 
-                  onClick={handleRemoveFile}
-                  className="text-red-500 hover:text-red-400 transition-colors"
-                >
-                  <i className='bx bx-x text-xl'></i>
-                </button>
-              </div>
+              ))}
             </div>
 
-            <div className="flex gap-4 justify-center">
+            <div className="flex gap-4 justify-center mt-6">
               <button 
-                onClick={handleRemoveFile}
+                onClick={handleUploadAnother}
                 className="border border-[#2a2a2a] py-3 px-6 rounded-full font-semibold tracking-wider transition-all duration-300 hover:bg-[#1a1a1a]"
               >
-                Upload Another
+                <i className='bx bx-plus mr-2'></i>Add More Files
               </button>
               <button 
                 onClick={handleContinue}

@@ -15,6 +15,7 @@ const Process = () => {
   const [previewUrl, setPreviewUrl] = useState(null);
   const [previewImageUrl, setPreviewImageUrl] = useState(null);
   const [isGeneratingPreview, setIsGeneratingPreview] = useState(false);
+  const [selectedFileIndex, setSelectedFileIndex] = useState(0); // For selecting which file to use for preview
 
   useEffect(() => {
     // Immediate check before component fully loads
@@ -29,21 +30,31 @@ const Process = () => {
 
   const checkUploadedFile = () => {
     try {
-      // Check if user has uploaded a file
+      // Check if user has uploaded files
       const project = JSON.parse(localStorage.getItem('currentProject') || '{}');
       
-      // Multiple checks to ensure file is properly uploaded
-      if (!project || !project.fileId || !project.fileName || !project.uploadedAt) {
-        // No file uploaded or incomplete upload data
-        alert('Please upload an Excel file first before accessing this page.');
-        navigate('/upload');
-        return;
-      }
-
-      // Additional validation - check if fileId is valid
-      if (typeof project.fileId !== 'string' || project.fileId.trim() === '') {
-        alert('Invalid file data. Please upload a file again.');
-        localStorage.removeItem('currentProject'); // Clear invalid data
+      // Check for new multi-file structure
+      if (project.files && Array.isArray(project.files) && project.files.length > 0) {
+        // New multi-file structure
+        setProjectData(project);
+      } else if (project.fileId && project.fileName) {
+        // Legacy single file structure - convert to new format
+        const convertedProject = {
+          files: [{
+            fileId: project.fileId,
+            name: project.fileName,
+            size: project.fileSize,
+            uploadedAt: project.uploadedAt,
+            sheets: project.sheets || []
+          }],
+          firstPageCustomization: project.firstPageCustomization,
+          lastUpdated: new Date().toISOString()
+        };
+        localStorage.setItem('currentProject', JSON.stringify(convertedProject));
+        setProjectData(convertedProject);
+      } else {
+        // No files uploaded
+        alert('Please upload Excel files first before accessing this page.');
         navigate('/upload');
         return;
       }
@@ -78,38 +89,64 @@ const Process = () => {
   };
 
   const handleRestart = async () => {
+    // Show confirmation dialog
+    const confirmed = window.confirm(
+      'Are you sure you want to restart? This will:\n\n' +
+      '• Delete all uploaded files\n' +
+      '• Clear all generated previews and images\n' +
+      '• Reset all customizations\n' +
+      '• Return to the home page\n\n' +
+      'This action cannot be undone.'
+    );
+    
+    if (!confirmed) {
+      return;
+    }
+
     try {
-      console.log('Starting complete restart - clearing all uploads...');
+      console.log('Starting complete restart - clearing all files...');
       
-      // Call the new clear-all endpoint to delete ALL uploaded files
-      const response = await fetch('http://localhost:8000/api/upload/clear-all', {
+      // Clear all files using the backend endpoint
+      const response = await fetch('http://localhost:8000/api/clear-all', {
         method: 'DELETE'
       });
       
       if (!response.ok) {
         const errorText = await response.text();
         console.error('Clear-all request failed:', response.status, errorText);
+        alert('Warning: Backend cleanup may have failed, but continuing with restart...');
       } else {
         const result = await response.json();
-        console.log('All uploads cleared successfully:', result);
+        console.log('Cleanup completed:', result);
       }
       
       // Clear localStorage
       localStorage.removeItem('currentProject');
+      console.log('Cleared localStorage');
+      
+      // Show success message briefly before navigating
+      alert('Restart completed! All files cleared and returning to home page.');
       
       // Navigate to home page
       navigate('/');
       
     } catch (error) {
       console.error('Error during restart:', error);
-      // Still navigate home and clear data even if backend clear fails
+      
+      // Show error but still proceed with cleanup and navigation
+      alert('Warning: Some errors occurred during restart, but continuing...');
+      
+      // Still clear localStorage and navigate even if backend clear fails
       localStorage.removeItem('currentProject');
       navigate('/');
     }
   };
 
   const generateLivePreview = async (customPresentationTo = null, customMadeBy = null) => {
-    if (!projectData?.fileId) return;
+    if (!projectData?.files || projectData.files.length === 0) return;
+    
+    // Use the selected file for preview generation
+    const selectedFile = projectData.files[selectedFileIndex] || projectData.files[0];
     
     setIsGeneratingPreview(true);
     try {
@@ -120,7 +157,7 @@ const Process = () => {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          fileId: projectData.fileId,
+          fileId: selectedFile.fileId,
           customizations: {
             presentationTo: customPresentationTo || presentationTo || 'Presentation to',
             madeBy: customMadeBy || madeBy || 'Made by'
@@ -309,15 +346,50 @@ const Process = () => {
               />
             </div>
 
-            {/* File Info */}
+            {/* Files Info */}
             <div className="bg-gradient-to-r from-gray-800/30 to-gray-700/30 rounded-xl p-6 border border-gray-600/50 backdrop-blur-sm">
-              <p className="text-sm text-gray-300 mb-3 font-medium">Current File:</p>
-              <p className="text-white font-semibold text-lg">
-                {projectData?.fileName || 'No file loaded'}
+              <p className="text-sm text-gray-300 mb-3 font-medium">
+                Uploaded Files ({projectData?.files?.length || 0}):
               </p>
-              <p className="text-xs text-gray-400 mt-2">
-                Uploaded: {projectData?.uploadedAt ? new Date(projectData.uploadedAt).toLocaleString() : 'Unknown'}
-              </p>
+              
+              {projectData?.files && projectData.files.length > 0 ? (
+                <div className="space-y-3 max-h-32 overflow-y-auto">
+                  {projectData.files.map((file, index) => (
+                    <div 
+                      key={file.fileId} 
+                      className={`p-3 rounded-lg border cursor-pointer transition-all duration-200 ${
+                        selectedFileIndex === index 
+                          ? 'border-[#e99b63] bg-[#e99b63]/10' 
+                          : 'border-gray-600 hover:border-gray-500'
+                      }`}
+                      onClick={() => setSelectedFileIndex(index)}
+                    >
+                      <p className="text-white font-semibold text-sm truncate">
+                        {index + 1}. {file.name}
+                      </p>
+                      <div className="flex items-center gap-2 text-xs text-gray-400 mt-1">
+                        <span>{(file.size / 1024 / 1024).toFixed(2)} MB</span>
+                        <span>•</span>
+                        <span>{file.sheets?.length || 0} sheet{(file.sheets?.length || 0) !== 1 ? 's' : ''}</span>
+                        {selectedFileIndex === index && (
+                          <>
+                            <span>•</span>
+                            <span className="text-[#e99b63]">Active for preview</span>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-gray-400 text-sm">No files loaded</p>
+              )}
+              
+              {projectData?.lastUpdated && (
+                <p className="text-xs text-gray-500 mt-3">
+                  Last updated: {new Date(projectData.lastUpdated).toLocaleString()}
+                </p>
+              )}
             </div>
           </div>
 
